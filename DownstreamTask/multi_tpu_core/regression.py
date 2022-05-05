@@ -3,7 +3,7 @@ from unittest.util import _MAX_LENGTH
 import pandas as pd
 from transformers import (
     AutoModelForSequenceClassification, 
-    AutoTokenizer, 
+    AutoTokenizer,
     AutoModel, 
     BertModel,
     MODEL_MAPPING,
@@ -106,6 +106,12 @@ def parse_args():
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
+        "--optim_strategy",
+        type=int,
+        default=0,
+        help="Optimizer strategy",
+    )
+    parser.add_argument(
         "--learning_rate",
         type=float,
         default=5e-5,
@@ -202,22 +208,6 @@ def parse_args():
     args = parser.parse_args()
 
     return args
-# FinancialPhraseBank, CausalityDetection, Lithuanian
-
-# class RegressionBasedBert(torch.nn.Module):
-#     def __init__(self, embedding_model):
-#             super(RegressionBasedBert, self).__init__()
-#             self.embedding_model = embedding_model
-#             self.fc = torch.nn.Sequential(
-#                         torch.nn.Linear(768, 384),
-#                         torch.nn.ReLU(),
-#                         torch.nn.Linear(384, 1)    
-#             )
-#     def forward(self, ids, mask):
-#         x = self.embedding_model(ids, mask)['last_hidden_state'][:, 0, :]
-#         x = self.fc(x)
-#         return x
-
 
 def main():
     args = parse_args()
@@ -273,8 +263,9 @@ def main():
     # test_data = all_data[1000:1100]
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
     
-    result_file = '_'.join(['Regression', args.model_name_or_path, 'task.txt'])
+    result_file = '_'.join(['Evaluation', 'regression', 'optim_strategy', str(args.optim_strategy), args.model_name_or_path, 'task.txt'])
     f = open(result_file, 'w')
+    
     """
     data: List -> [sent: string, sentiment_score: float]
     """
@@ -290,8 +281,6 @@ def main():
             masks.append(mask)
         inputs = torch.tensor(np.array(ids))
         masks = torch.tensor(np.array(masks))
-#         inputs = torch.cat(ids)
-#         masks = torch.cat(masks)
         labels = torch.tensor(np.array([i[1] for i in data], dtype='f'))
         # print(type(labels))
         # sys.exit()
@@ -305,46 +294,44 @@ def main():
         trigger_times = 0
         accelerator.print('training')
         for epoch in range(epochs):
+            losses = []
             accelerator.print('\n')
             model.train()
-            losses = []
+            total_loss = 0
             for step, batch in tqdm(enumerate(train_dataloader)):
                 b_input_ids = batch[0].to(device)
                 b_input_mask = batch[1].to(device)
                 b_labels = batch[2].to(device)
 
                 model.zero_grad()
-#                 outputs = model(b_input_ids, b_input_mask).reshape(b_labels.shape).to(device)
-#                 outputs = model(b_input_ids, b_input_mask).to(device)
-#                 print(outputs.shape)
-#                 print(b_labels.shape)
-#                 sys.exit()
-#                 outputs = outputs.squeeze(1)
-#                 outputs = outputs
-#                 loss = loss_fn(outputs, b_labels)
-#                 total_loss += loss.item()
-
-                outputs = model(
-                    input_ids = b_input_ids, 
-                    attention_mask = b_input_mask, 
-                    labels = b_labels)
-                
-                loss = outputs.loss
+                outputs = model(b_input_ids, 
+                                token_type_ids=None, 
+                                attention_mask=b_input_mask, 
+                                labels=b_labels)
+                loss = outputs[0]
+#                 logits = outputs[1].reshape(b_labels.shape)
+#                 accelerator.print(logits)
+#                 accelerator.print(b_labels)
+#                 loss = loss_fn(logits, b_labels)
+                #total_loss += loss.item()
+        
                 accelerator.backward(loss)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 losses.append(accelerator.gather(loss))
-#                 optimizer.zero_grad()
                 
             lr_scheduler.step()
-            
-            # Early stopping
             the_current_loss = torch.cat(losses).mean()
-#             accelerator.print('Epoch: {}, Total loss: {:.2f}'.format(epoch, the_current_loss))
+            accelerator.print('Epoch: {}, Total loss: {:.2f}'.format(epoch, the_current_loss))
+#             print(the_current_loss)
+#             sys.exit()
+            # Early stopping
+#             
+            
 #             f.writelines('Epoch: {}, Total loss: {:.2f}\n'.format(epoch, the_current_loss))
 
             # print('The current loss:', the_current_loss)
-
+#             the_current_loss = total_loss
             if the_current_loss > the_last_loss:
                 trigger_times += 1
                 accelerator.print('trigger times:', trigger_times)
@@ -375,22 +362,27 @@ def main():
             b_input_mask = batch[1].to(device)
             b_labels = batch[2].to(device)
             with torch.no_grad():
-                outputs = model(input_ids=b_input_ids, attention_mask=b_input_mask).logits.reshape(b_labels.shape)
-#             outputs = outputs.squeeze(1)
-#             targets.append(b_labels) 
-#             preds.append(outputs)
-            labels, outputs = accelerator.gather([b_labels, outputs])
+#                     logits = model(b_input_ids, b_input_mask)
+                outputs = model(b_input_ids, 
+                                token_type_ids=None, 
+                                attention_mask=b_input_mask)
+            logits = outputs[0].reshape(b_labels.shape)
+            labels, outputs = accelerator.gather([b_labels, logits])
             targets.append(labels)
             preds.append(outputs)
         
         targets = torch.cat(targets)[:num_test_sample]
         preds = torch.cat(preds)[:num_test_sample]
         
-        mse = mean_squared_error(targets, preds)
+#         mse = abs(mean_squared_error(targets.cpu().numpy(), preds.cpu().numpy()))
+#         r2 = r2_score(targets.cpu().numpy(), preds.cpu().numpy())
+        mse = abs(mean_squared_error(targets, preds))
         r2 = r2_score(targets, preds)
         
         accelerator.print('mse: {:.4f}'.format(mse))
         accelerator.print('r2: {:4f}'.format(r2))
+        f.writelines('mse: {:.4f}\n'.format(mse))
+        f.writelines('r2: {:.4f}\n'.format(r2))
 
         return mse, r2
 
@@ -400,6 +392,7 @@ def main():
     count = 1
     for train_index, val_index in kf.split(all_data):
         accelerator.print('=======fold: {}========='.format(count))
+        f.writelines('=======fold: {}=========\n'.format(count))
         train_df = all_data.iloc[train_index]
         test_df = all_data.iloc[val_index]
 
@@ -411,7 +404,7 @@ def main():
         train_dataloader = GenericDataLoader(train_data, args.per_device_train_batch_size) 
         test_dataloader = GenericDataLoader(test_data, args.per_device_eval_batch_size)
         
-        # define model
+#         # define model
 #         embedding_model = AutoModel.from_pretrained(args.model_name_or_path).to(device)
 #         if args.freeze_layer_count:
 #                 # We freeze here the embeddings of the model
@@ -425,31 +418,23 @@ def main():
 #                         for param in layer.parameters():
 #                             param.requires_grad = False
 #         model = RegressionBasedBert(embedding_model).to(device)
-
-        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path, num_labels = 1)
-        if args.freeze_layer_count:
-            # We freeze here the embeddings of the model
-            for param in model.bert.embeddings.parameters():
-                param.requires_grad = False
-
-            if args.freeze_layer_count != -1:
-                # if freeze_layer_count == -1, we only freeze the embedding layer
-                # otherwise we freeze the first `freeze_layer_count` encoder layers
-                for layer in embedding_model.bert.encoder.layer[:args.freeze_layer_count]:
-                    for param in layer.parameters():
-                        param.requires_grad = False
+        
+        model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path, num_labels=1)
+        
         # loss function
         loss_fn = torch.nn.MSELoss()
         
         # optimizer
-        bert_params = model.bert.named_parameters()
-        classifier_params = model.classifier.named_parameters()
-        grouped_params = [
-            {'params': [p for n,p in bert_params if p.requires_grad==True], 'lr': args.lr_bert},
-            {'params': [p for n,p in classifier_params if p.requires_grad==True], 'lr': args.lr_fc}
-        ] 
-        optimizer = torch.optim.AdamW(grouped_params)
-        
+        if args.optim_strategy == 0:
+            bert_params = model.bert.encoder.named_parameters()
+            classifier_params = model.classifier.named_parameters()
+            grouped_params = [
+                {'params': [p for n,p in bert_params if p.requires_grad==True], 'lr': args.lr_bert},
+                {'params': [p for n,p in classifier_params if p.requires_grad==True], 'lr': args.lr_fc}
+            ] 
+            optimizer = torch.optim.AdamW(grouped_params)
+        elif args.optim_strategy == 1:
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate) 
         # scheduler
         num_training_steps = args.num_train_epochs * len(train_dataloader)
         lr_scheduler = get_scheduler(
@@ -475,7 +460,6 @@ def main():
     accelerator.print('Final evaluation')
     accelerator.print('Final mse: {:.4f}'.format(sum(MSE)/args.k_fold))
     accelerator.print('Final r2: {:.4f}'.format(sum(R2)/args.k_fold))
-    
     f.writelines('\n\n\n\n\n')
     f.writelines('Final evaluation\n')
     f.writelines('Average mse: {:.2f}\n'.format(sum(MSE)/args.k_fold))
@@ -485,3 +469,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
