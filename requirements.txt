@@ -1,0 +1,5 @@
+accelerate
+torch
+transformers
+sentence-transformers
+pandas
