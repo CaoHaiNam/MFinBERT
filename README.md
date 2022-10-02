@@ -1,1 +1,1 @@
-# FinBert
+# MFinBERT
