@@ -32,6 +32,8 @@ from transformers.utils.versions import require_version
 from datasets import load_metric
 import accelerate
 import sys
+import wandb
+from transformers.utils import check_min_version, get_full_repo_name, is_offline_mode, send_example_telemetry
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
@@ -224,30 +226,8 @@ def count_parameters(model):
     print(f"Total Trainable Params: {total_params}")
     return total_params
 
-# class ClassificationBasedBert(BertPreTrainedModel):
-#     def __init__(self, embedding_model, num_class, config):
-#         super(ClassificationBasedBert, self).__init__(config)
-#         self.embedding_model = embedding_model
-#         self.fc = torch.nn.Sequential(
-#                     torch.nn.Linear(768, num_class)
-#         )
-#         self.post_init()
-        
-#     def forward(self, ids, mask):
-#         x = self.embedding_model(ids, mask)['last_hidden_state'][:, 0, :]
-#         x = self.fc(x)
-#         return x
-
 def main():
     args = parse_args()
-    
-#     accelerator = Accelerator()
-#     try:
-#         device = accelerator.device
-#     except:
-#         device = 'cpu'
-#     device = torch.device("cuda") if torch.cuda.is_available() else torch.device(device)
-#     print('device: {}'.format(device))
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will pick up all supported trackers in the environment
@@ -343,15 +323,10 @@ def main():
         dataloader = DataLoader(data, sampler=sampler, batch_size=batch_size)
         return dataloader
 
-    def train(model, epochs, loss_fn, optimizer, lr_scheduler, validate_strategy, num_val_sample, train_dataloader, val_dataloader=None):
+    def train(model, wandb, epochs, loss_fn, optimizer, lr_scheduler, validate_strategy, num_val_sample, train_dataloader, val_dataloader=None):
         best_acc = 0
         best_model = model
-#         metric = load_metric(args.metrics)
-#         metric = load_metric('accuracy')
-#         f1_metric = load_metric("f1")
         for epoch in range(epochs):
-#             print('Training epoch: {}'.format(epoch))    
-#             f.writelines('Training epoch: {}\n'.format(epoch))    
             total_loss = 0
             model.train()
             
@@ -370,6 +345,7 @@ def main():
 #                 accelerator.print(logits)
 #                 accelerator.print(b_labels)
                 loss = loss_fn(logits, b_labels)
+                wandb.log({'train_loss_per_step': loss})
                 #total_loss += loss.item()
         
                 accelerator.backward(loss)
@@ -378,13 +354,11 @@ def main():
                 
             lr_scheduler.step()
             
-            #avg_train_loss = total_loss / len(train_dataloader)
-#             print("Average training loss: {0:.4f}".format(avg_train_loss))
-#             f.writelines("Average training loss: {0:.4f}".format(avg_train_loss)+'\n')
-
+            avg_train_loss = total_loss / len(train_dataloader)
+            accelerator.print("Average training loss: {0:.4f}".format(avg_train_loss))
+            wandb.log({'avg_loss': avg_train_loss})
             
-#             print("Running validation")
-#             f.writelines("Running validation"+'\n')
+            accelerator.print("Running validation")
 
             model.eval()
             targets, preds = [], []
@@ -402,11 +376,6 @@ def main():
 #                 outputs = logits.argmax(dim=-1)
                 outputs, labels = accelerator.gather([logits, b_labels])
                 
-#                 metric.add_batch(
-#                     predictions=predictions,
-#                     references=labels
-#                 )
-                
                 targets.append(labels)
                 preds.append(outputs)
                 
@@ -414,6 +383,7 @@ def main():
             preds = torch.cat(preds)[:num_val_sample]
             
             cur_acc =  accuracy_score(targets, preds)
+            wandb.log({'val_accuracy': cur_acc})
             
 #             eval_metric = metric.compute()
 #             Use accelerator.print to print only on the main process.
@@ -445,8 +415,6 @@ def main():
             batch = tuple(t.to(device) for t in batch)
             b_input_ids, b_input_mask, b_labels = batch
             with torch.no_grad():
-#                 logits = model(b_input_ids, b_input_mask)
-                
 #             logits = logits.detach().cpu().numpy()
 #             label_ids = b_labels.to('cpu').numpy()
 #             pred_list.extend(np.argmax(logits, axis=1).flatten())
@@ -455,7 +423,6 @@ def main():
                                 token_type_ids=None, 
                                 attention_mask=b_input_mask)
             logits = outputs[0]
-#             outputs = logits.argmax(dim=-1)
             logits = torch.argmax(logits, dim=1)
             labels, outputs = accelerator.gather([b_labels, logits])
             targets.append(labels)
@@ -463,12 +430,16 @@ def main():
         
         targets = torch.cat(targets)[:num_test_sample]
         preds = torch.cat(preds)[:num_test_sample]
-#         accelerator.print(len(targets))
-#         accelerator.print(len(preds))
-#         accelerator.print(classification_report(targets, preds, zero_division=0, digits=4))
-        f.writelines(classification_report(targets, preds, zero_division=0)+'\n')
+        # f.writelines(classification_report(targets, preds, zero_division=0)+'\n')
         return accuracy_score(targets, preds), f1_score(targets, preds, average='macro'), f1_score(targets, preds, average='micro')
-
+    
+    # Tracking loss with wandb
+    wandb.init(
+        # Set the project where this run will be logged
+        project="MFinBERT_classification_subtask", 
+        name=f"experiment", 
+    )
+    
     if args.validation_strategy == 'cross_validation':
         k_fold = args.k_fold 
         data = pd.DataFrame(data, columns=['text', 'label'])
@@ -499,25 +470,21 @@ def main():
             y = torch.tensor([i[1] for i in train_data])
             class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(y), y=y.numpy())
             class_weights=torch.tensor(class_weights,dtype=torch.float).to(device)
-            
-#             embedding_model = AutoModel.from_pretrained(args.model_name_or_path).to(device)
-
-#             if args.freeze_layer_count:
-#                 # We freeze here the embeddings of the model
-#                 for param in embedding_model.embeddings.parameters():
-#                     param.requires_grad = False
-
-#                 if args.freeze_layer_count != -1:
-#                     # if freeze_layer_count == -1, we only freeze the embedding layer
-#                     # otherwise we freeze the first `freeze_layer_count` encoder layers
-#                     for layer in embedding_model.encoder.layer[:args.freeze_layer_count]:
-#                         for param in layer.parameters():
-#                             param.requires_grad = False
-
-#             model = ClassificationBasedBert(embedding_model, args.num_labels).to(device)   
-            # optimizer = AdamW(model.parameters(), lr=args.learning_rate)   
+             
             model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path, num_labels=args.num_labels)
         
+            if args.freeze_layer_count:
+                # We freeze here the embeddings of the model
+                for param in model.bert.embeddings.parameters():
+                    param.requires_grad = False
+
+                if args.freeze_layer_count != -1:
+                    # if freeze_layer_count == -1, we only freeze the embedding layer
+                    # otherwise we freeze the first `freeze_layer_count` encoder layers
+                    for layer in model.bert.encoder.layer[:args.freeze_layer_count]:
+                        for param in layer.parameters():
+                            param.requires_grad = False
+                            
             """
             optimizer
             """
@@ -559,9 +526,17 @@ def main():
         f.writelines(" Final macro f1 score: {0:.4f}".format(sum(MAC_F1)/len(MAC_F1))+'\n')
         f.writelines(" Final micro f1 score: {0:.4f}".format(sum(MIC_F1)/len(MIC_F1))+'\n')
         
+        if args.output_dir is not None:
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(best_model)
+            unwrapped_model.save_pretrained(
+                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            )
+            if accelerator.is_main_process:
+                tokenizer.save_pretrained(args.output_dir)
+        
     else:
         
-        # y = torch.tensor([i[1] for i in _train_data[:num_train]])
         if args.state:
             train_data = train_data[:400]
             test_data = test_data[:200]
@@ -569,34 +544,26 @@ def main():
         
         num_train_sample, num_test_sample = len(train_data), len(test_data)
         train_dataloader = GenericDataLoader(train_data, args.per_device_train_batch_size)
-        # val_dataloader = GenericDataLoader(_train_data[num_train:])
         test_dataloader = GenericDataLoader(test_data, args.per_device_eval_batch_size)
 
         y = torch.tensor([i[1] for i in train_data])
         class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(y), y=y.numpy())
         class_weights=torch.tensor(class_weights,dtype=torch.float).to(device)
-
-#         embedding_model = BertModel.from_pretrained(args.model_name_or_path).to(device)
-#         # print(embedding_model)
-#         # for i in embedding_model:
-#         #     print(i)
-#         # sys.exit()
-#         if args.freeze_layer_count:
-#             # We freeze here the embeddings of the model
-#             for param in embedding_model.embeddings.parameters():
-#                 param.requires_grad = False
-
-#             if args.freeze_layer_count != -1:
-#                 # if freeze_layer_count == -1, we only freeze the embedding layer
-#                 # otherwise we freeze the first `freeze_layer_count` encoder layers
-#                 for layer in embedding_model.encoder.layer[:args.freeze_layer_count]:
-#                     for param in layer.parameters():
-#                         param.requires_grad = False
-
-#         model = ClassificationBasedBert(embedding_model, args.num_labels).to(device)
-
+        
         model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path, num_labels=args.num_labels)
         
+        if args.freeze_layer_count:
+            # We freeze here the embeddings of the model
+            for param in model.bert.embeddings.parameters():
+                param.requires_grad = False
+
+            if args.freeze_layer_count != -1:
+                # if freeze_layer_count == -1, we only freeze the embedding layer
+                # otherwise we freeze the first `freeze_layer_count` encoder layers
+                for layer in model.bert.encoder.layer[:args.freeze_layer_count]:
+                    for param in layer.parameters():
+                        param.requires_grad = False
+
         """
         optimizer
         """
@@ -626,22 +593,29 @@ def main():
                 model, optimizer, train_dataloader, test_dataloader, lr_scheduler
                 )
         
-#         count_parameters(model)
-    
-        best_model = train(model, args.num_train_epochs, loss_fn, optimizer, lr_scheduler, args.validation_strategy, num_test_sample, train_dataloader, test_dataloader)
+        best_model = train(model, wandb, args.num_train_epochs, loss_fn, optimizer, lr_scheduler, args.validation_strategy, num_test_sample, train_dataloader, test_dataloader)
 
         acc, mac_f1_score, mic_f1_score = evaluation(best_model, test_dataloader, num_test_sample)
-#         acc, mac_f1_score, mic_f1_score = evaluation(model, test_dataloader)
 
         accelerator.print('======================')
         accelerator.print(" Final acccuracy: {0:.4f}".format(acc))
         accelerator.print(" Final macro f1 score: {0:.4f}".format(mac_f1_score))
         accelerator.print(" Final micro f1 score: {0:.4f}".format(mic_f1_score))
 
-        f.writelines('\n======================\n')
-        f.writelines("Final acccuracy: {0:.4f}".format(acc)+'\n')
-        f.writelines("Final macro f1 score: {0:.4f}".format(mac_f1_score)+'\n')
-        f.writelines("Final micro f1 score: {0:.4f}".format(mic_f1_score)+'\n')
+        # f.writelines('\n======================\n')
+        # f.writelines("Final acccuracy: {0:.4f}".format(acc)+'\n')
+        # f.writelines("Final macro f1 score: {0:.4f}".format(mac_f1_score)+'\n')
+        # f.writelines("Final micro f1 score: {0:.4f}".format(mic_f1_score)+'\n')
+        
+        if args.output_dir is not None:
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(best_model)
+            unwrapped_model.save_pretrained(
+                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            )
+            if accelerator.is_main_process:
+                tokenizer.save_pretrained(args.output_dir)
+
 
     f.close()
     
