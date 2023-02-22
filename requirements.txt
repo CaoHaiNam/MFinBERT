@@ -3,3 +3,6 @@ torch
 transformers
 sentence-transformers
 pandas
+unidecode
+scikit-learn
+prettytable
