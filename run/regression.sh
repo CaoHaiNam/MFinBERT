@@ -1,10 +1,10 @@
 # bert-base-cased
 # bert-base-multilingual-cased
-accelerate launch DownstreamTask/multi_tpu_core/regression.py \
+accelerate launch code/regression.py \
         --k_fold 10 \
         --model_name_or_path bert-base-multilingual-cased \
         --validation_strategy cross_validation \
-        --data_file DownstreamTask/data/FiQA/task1/train/task1_headline_ABSA_train.json DownstreamTask/data/FiQA/task1/train/task1_post_ABSA_train.json \
+        --data_file data/FiQA/task1/train/task1_headline_ABSA_train.json data/FiQA/task1/train/task1_post_ABSA_train.json \
         --tokenizer_name bert-base-multilingual-cased \
         --max_seq_length 512 \
         --per_device_train_batch_size 8 \
