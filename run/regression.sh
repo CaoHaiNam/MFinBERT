@@ -15,4 +15,5 @@ accelerate launch code/regression.py \
         --lr_fc 1e-3 \
         --num_train_epochs 10 \
         --freeze_layer_count 0 \
+        --seed 1000 \
         --patience 3

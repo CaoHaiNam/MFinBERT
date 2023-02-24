@@ -15,5 +15,5 @@ accelerate launch code/classification.py \
         --state 0 \
         --num_train_epochs 5 \
         --freeze_layer_count 0 \
-        --seed 1000
+        --seed 1000 \
         --with_tracking 

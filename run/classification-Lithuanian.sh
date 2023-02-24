@@ -15,4 +15,5 @@ accelerate launch code/classification.py \
         --lr_fc 1e-3 \
         --state 0 \
         --num_train_epochs 20 \
+        --seed 1000 \
         --freeze_layer_count 0
