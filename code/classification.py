@@ -262,6 +262,8 @@ def main():
 #     device = torch.device("cuda") if torch.cuda.is_available() else torch.device(device)
 #     print('device: {}'.format(device))
 #     sys.exit()
+    if args.seed is not None:
+        set_seed(args.seed)
     
     if args.dataset=='FinancialPhraseBank':
         k_fold = args.k_fold
